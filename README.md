@@ -5,12 +5,16 @@ untuk skema payload dan urutan langkah.
 
 ## Alur (1x per hari)
 
-1. `GET /rest/api/search` (CQL `lastmodified >= now("-3d")`, space `II`) → id halaman termodifikasi
-2. `GET /api/v2/spaces/{id}/pages?status=trashed` → id halaman trashed
+0. `GET /api/v2/spaces?keys=II,ABC` → resolve space key → space id (gagal keras bila ada key yang tidak ketemu)
+1. `GET /rest/api/search` (CQL `space in ("II","ABC") AND lastmodified >= now("-3d")`) → id halaman termodifikasi
+2. `GET /api/v2/spaces/{id}/pages?status=trashed` per space → id halaman trashed (digabung)
 3. Purge Qdrant semua `pageId` trashed (`match.any`)
 4. Tiap halaman modifikasi (kecuali yang trashed): fetch `GET /api/v2/pages/{id}?body-format=export_view`
    → Convert API (Docling) → chunk 6000/200 → embedding per chunk → purge `pageId` → upsert
 5. Halaman yang 404 / bukan `current` hanya dipurge, tidak di-ingest
+
+Multi-space: isi `CONFLUENCE_SPACE_KEYS=II,ABC` (pisah koma). Space ID tidak perlu diisi, diambil dari API.
+Semua space masuk ke satu collection; `spaceKey` di payload diambil per halaman.
 
 Sparse BM25 dihitung oleh Qdrant (inference object `qdrant/bm25`, `options.avg_len`), sama seperti workflow.
 
