@@ -7,7 +7,7 @@ from .http import send
 
 
 def build_metadata(page: dict, s: Settings) -> dict:
-    """Same fields as the `Convert Markdown` node's metadata."""
+    """Page metadata sent to the convert API and stored in the Qdrant payload."""
     links = page["_links"]
     return {
         "pageId": page["id"],
