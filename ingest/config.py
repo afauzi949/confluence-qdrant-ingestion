@@ -19,8 +19,7 @@ class Settings:
     confluence_base_url: str
     confluence_email: str
     confluence_api_token: str
-    confluence_space_key: str
-    confluence_space_id: str
+    confluence_space_keys: tuple[str, ...]
     modified_window_days: int
     search_page_limit: int
     trashed_page_limit: int
@@ -69,6 +68,12 @@ class Settings:
         if missing:
             raise ConfigError(f"Missing required env vars: {', '.join(missing)}")
 
+        # CONFLUENCE_SPACE_KEY (singular) is still read as a fallback
+        raw_keys = e.get("CONFLUENCE_SPACE_KEYS") or e.get("CONFLUENCE_SPACE_KEY") or "II"
+        space_keys = tuple(dict.fromkeys(k.strip() for k in raw_keys.split(",") if k.strip()))
+        if not space_keys:
+            raise ConfigError("CONFLUENCE_SPACE_KEYS must list at least one space key")
+
         chunk_mode = e.get("CHUNK_MODE", "api").strip().lower()
         if chunk_mode not in {"api", "local"}:
             raise ConfigError("CHUNK_MODE must be 'api' or 'local'")
@@ -77,8 +82,7 @@ class Settings:
             confluence_base_url=e.get("CONFLUENCE_BASE_URL", "https://altoid.atlassian.net/wiki").rstrip("/"),
             confluence_email=e["CONFLUENCE_EMAIL"].strip(),
             confluence_api_token=e["CONFLUENCE_API_TOKEN"].strip(),
-            confluence_space_key=e.get("CONFLUENCE_SPACE_KEY", "II"),
-            confluence_space_id=e.get("CONFLUENCE_SPACE_ID", "131465483"),
+            confluence_space_keys=space_keys,
             modified_window_days=int(e.get("MODIFIED_WINDOW_DAYS", "3")),
             search_page_limit=int(e.get("SEARCH_PAGE_LIMIT", "50")),
             trashed_page_limit=int(e.get("TRASHED_PAGE_LIMIT", "100")),

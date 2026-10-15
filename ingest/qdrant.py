@@ -11,9 +11,9 @@ PURGE_BATCH = 500
 
 
 def build_point(chunk: dict, dense: list[float], s: Settings) -> dict:
-    """One Qdrant point. Field set/order mirrors `Assemble Qdrant Point`.
+    """One Qdrant point.
 
-    `chunk` is a Mapping Data row: chunk fields + avg_len + page metadata.
+    `chunk` is one row: chunk fields + avg_len + page metadata.
     The sparse BM25 vector is an inference object computed by Qdrant.
     """
     return {

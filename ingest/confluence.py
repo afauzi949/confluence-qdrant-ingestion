@@ -16,6 +16,7 @@ class ConfluenceClient:
     def __init__(self, client: httpx.Client, settings: Settings):
         self._c = client
         self._s = settings
+        self._space_ids: dict[str, str] | None = None  # key -> id, resolved lazily
 
     def _get(self, url: str, params: dict | None = None) -> httpx.Response:
         return send(
@@ -52,11 +53,33 @@ class ConfluenceClient:
             url = self._next_url(data.get("_links", {}))
             next_params = None  # the next URL already carries the query
 
+    def resolve_space_ids(self) -> dict[str, str]:
+        """Space key -> id for every configured key (v2 `GET /spaces?keys=`).
+
+        Fails loudly when a key is not found, so a typo does not silently skip
+        a space (and with it the trashed-page purge for that space).
+        """
+        if self._space_ids is None:
+            s = self._s
+            found: dict[str, str] = {}
+            for data in self._paginate(
+                f"{s.confluence_base_url}/api/v2/spaces",
+                {"keys": ",".join(s.confluence_space_keys), "limit": 250},
+            ):
+                found.update({str(r["key"]): str(r["id"]) for r in data.get("results", [])})
+            missing = [k for k in s.confluence_space_keys if k not in found]
+            if missing:
+                raise RuntimeError(f"Confluence space(s) not found or not accessible: {', '.join(missing)}")
+            self._space_ids = {k: found[k] for k in s.confluence_space_keys}
+            log.info("resolved spaces: %s", self._space_ids)
+        return self._space_ids
+
     def search_modified_ids(self) -> list[str]:
-        """Pages in the space modified within the window (CQL, v1 search)."""
+        """Pages in the configured spaces modified within the window (CQL, v1 search)."""
         s = self._s
+        keys = ",".join(f'"{k}"' for k in s.confluence_space_keys)
         cql = (
-            f'type=page AND space="{s.confluence_space_key}" '
+            f"type=page AND space in ({keys}) "
             f'AND lastmodified >= now("-{s.modified_window_days}d") '
             "ORDER BY lastmodified DESC"
         )
@@ -69,15 +92,17 @@ class ConfluenceClient:
         return list(dict.fromkeys(ids))
 
     def list_trashed_ids(self) -> list[str]:
-        """All trashed pages of the space (v2). No date filter: trashing does
-        not bump the page version, so the full list is read on every run."""
+        """All trashed pages of every configured space (v2, one call chain per
+        space). No date filter: trashing does not bump the page version, so the
+        full list is read on every run."""
         s = self._s
         ids: list[str] = []
-        for data in self._paginate(
-            f"{s.confluence_base_url}/api/v2/spaces/{s.confluence_space_id}/pages",
-            {"status": "trashed", "sort": "-modified-date", "limit": s.trashed_page_limit},
-        ):
-            ids.extend(str(r["id"]) for r in data.get("results", []))
+        for space_id in self.resolve_space_ids().values():
+            for data in self._paginate(
+                f"{s.confluence_base_url}/api/v2/spaces/{space_id}/pages",
+                {"status": "trashed", "sort": "-modified-date", "limit": s.trashed_page_limit},
+            ):
+                ids.extend(str(r["id"]) for r in data.get("results", []))
         return list(dict.fromkeys(ids))
 
     def get_page(self, page_id: str) -> dict | None:

@@ -22,14 +22,24 @@ def page(pid, status="current", title="T"):
 class Fake:
     """Routes mocked HTTP calls and records Qdrant traffic in order."""
 
-    def __init__(self, modified, trashed, pages, chunks=1, search_pages=None):
-        self.modified, self.trashed, self.pages, self.chunks = modified, trashed, pages, chunks
+    def __init__(self, modified, trashed, pages, chunks=1, search_pages=None, spaces=None):
+        self.modified, self.pages, self.chunks = modified, pages, chunks
+        # trashed: flat list (single space II) or {space_id: [ids]}
+        self.trashed = trashed if isinstance(trashed, dict) else {"131465483": trashed}
+        self.spaces = spaces or {"II": "131465483"}  # key -> id known to "Confluence"
+        self.requests = []
         self.search_pages = search_pages
         self.qdrant = []  # (method, path, body)
         self.embedded = []
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
         url, path = str(req.url), req.url.path
+        self.requests.append(req)
+        if path == "/wiki/api/v2/spaces":
+            wanted = req.url.params["keys"].split(",")
+            return httpx.Response(200, json={
+                "results": [{"id": self.spaces[k], "key": k} for k in wanted if k in self.spaces],
+                "_links": {"base": WIKI}})
         if path == "/wiki/rest/api/search":
             if self.search_pages:
                 start = int(req.url.params.get("start", 0))
@@ -41,10 +51,11 @@ class Fake:
                     "results": [{"content": {"id": i}} for i in ids], "_links": links})
             return httpx.Response(200, json={
                 "results": [{"content": {"id": i}} for i in self.modified], "_links": {"base": WIKI}})
-        if path.endswith("/spaces/131465483/pages"):
+        if path.startswith("/wiki/api/v2/spaces/") and path.endswith("/pages"):
             assert req.url.params["status"] == "trashed"
+            space_id = path.split("/")[-2]
             return httpx.Response(200, json={
-                "results": [{"id": i} for i in self.trashed], "_links": {"base": WIKI}})
+                "results": [{"id": i} for i in self.trashed[space_id]], "_links": {"base": WIKI}})
         if path.startswith("/wiki/api/v2/pages/"):
             p = self.pages.get(path.rsplit("/", 1)[1])
             return httpx.Response(200, json=p) if p else httpx.Response(404)
@@ -148,6 +159,40 @@ def test_dry_run_writes_nothing(settings):
     res = run(settings, fake, dry_run=True)
     assert fake.qdrant == [] and fake.embedded == []
     assert res.modified == ["1"] and res.trashed == ["9"]
+
+
+def test_multi_space_resolves_ids_and_merges(settings):
+    object.__setattr__(settings, "confluence_space_keys", ("II", "ABC"))
+    fake = Fake(["1", "2"], {"131465483": ["9"], "777": ["8", "9"]},
+                {"1": page("1"), "2": page("2")},
+                spaces={"II": "131465483", "ABC": "777"})
+    res = run(settings, fake)
+
+    assert res.trashed == ["9", "8"]  # merged across spaces, deduped
+    assert res.ingested == {"1": 1, "2": 1}
+    assert fake.qdrant[0][2]["filter"]["must"][0]["match"]["any"] == ["9", "8"]
+
+    cql = next(r.url.params["cql"] for r in fake.requests if r.url.path.endswith("/rest/api/search"))
+    assert 'space in ("II","ABC")' in cql
+    spaces_calls = [r for r in fake.requests if r.url.path == "/wiki/api/v2/spaces"]
+    assert len(spaces_calls) == 1 and spaces_calls[0].url.params["keys"] == "II,ABC"
+
+
+def test_unknown_space_key_fails_loudly(settings):
+    object.__setattr__(settings, "confluence_space_keys", ("II", "NOPE"))
+    fake = Fake(["1"], [], {"1": page("1")})
+    with pytest.raises(RuntimeError, match="NOPE"):
+        run(settings, fake)
+    assert fake.qdrant == []  # nothing written when a space cannot be resolved
+
+
+def test_space_keys_env_parsing(monkeypatch):
+    for k, v in {"CONFLUENCE_EMAIL": "u", "CONFLUENCE_API_TOKEN": "t",
+                 "EMBEDDING_API_KEY": "e", "QDRANT_API_KEY": "q",
+                 "CONFLUENCE_SPACE_KEYS": " II, ABC ,II,"}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr("ingest.config.load_dotenv", lambda *_a, **_k: None)
+    assert Settings.from_env().confluence_space_keys == ("II", "ABC")
 
 
 def test_missing_required_env(monkeypatch):
